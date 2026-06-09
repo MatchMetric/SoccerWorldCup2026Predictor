@@ -35,6 +35,13 @@ body { font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',Roboto,sans-serif
 .nav-btn:hover { color:var(--t); background:var(--s2); }
 .nav-btn.active { color:var(--gd); border-bottom-color:var(--gd); }
 
+/* SYNC BAR */
+.syncbar { background:var(--s2); border-bottom:1px solid var(--bd); display:flex; align-items:center; gap:12px; padding:8px 20px; flex-wrap:wrap; }
+.sync-btn { background:var(--gm); color:#fff; border:none; border-radius:8px; padding:7px 13px; font-size:12px; font-weight:600; cursor:pointer; font-family:inherit; white-space:nowrap; transition:background 0.15s; }
+.sync-btn:hover { background:var(--gt); }
+.sync-btn:disabled { opacity:0.5; cursor:default; }
+.sync-status { font-size:11px; color:var(--t3); line-height:1.4; flex:1; min-width:160px; }
+
 /* CONTENT & UTILS */
 .content { padding:20px; flex:1; }
 .view { display:none; }
@@ -224,6 +231,11 @@ body { font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',Roboto,sans-serif
     <button class="nav-btn" style="margin-left:auto;" onclick="showView('schedule',this)">📅 Schedule</button>
   </div>
 
+  <div class="syncbar">
+    <button class="sync-btn" id="syncBtn" onclick="syncResults()">⟳ Sync results</button>
+    <span class="sync-status" id="syncStatus">Pulls finished scores from TheSportsDB into Match Predictor mode. Works when run as a local/hosted file (not inside Claude.ai).</span>
+  </div>
+
   <div class="content">
     <div class="view active" id="vgroups"></div>
     <div class="view" id="vknockout"></div>
@@ -232,7 +244,7 @@ body { font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',Roboto,sans-serif
   </div>
 
   <div class="footer">
-    FIFA World Cup 2026™ &nbsp;·&nbsp; Fallback favourites based on Official Rankings
+    FIFA World Cup 2026™ &nbsp;·&nbsp; Fallback favourites based on FIFA World Rankings (1 April 2026)
     &nbsp;·&nbsp; Picks autosave <span class="save-dot" id="savedot"></span>
   </div>
 </div>
@@ -275,18 +287,19 @@ function fimg(t,cls){
   return`<img class="${cls}" src="${url}" alt="${t}" onerror="this.outerHTML='<span class=fb>${fb}</span>'" loading="lazy">`;
 }
 
+// Official FIFA/Coca-Cola Men's World Ranking — 1 April 2026 (last update before kickoff).
+// All 48 qualified teams at their true world-ranking positions.
 const FIFA_RANK = {
-  France:1,Spain:2,Argentina:3,England:4,Brazil:5,
-  Portugal:6,Netherlands:7,Morocco:8,Belgium:9,Germany:10,
-  Colombia:11,Uruguay:12,Japan:13,Croatia:14,Mexico:15,
-  USA:16,Ecuador:17,Senegal:18,Switzerland:19,
-  "South Korea":21,Austria:22,Norway:23,Australia:24,
-  Scotland:25,"Côte d'Ivoire":26,Algeria:27,"Türkiye":28,
-  Egypt:29,Canada:30,Ghana:33,Sweden:34,Tunisia:35,
-  "Saudi Arabia":36,Iraq:37,Paraguay:38,"New Zealand":39,Iran:40,
-  Czechia:41,"Bosnia & Herz.":42,Uzbekistan:43,
-  Jordan:44,"South Africa":45,Haiti:46,
-  Qatar:47,"Cabo Verde":48,Panama:49,"DR Congo":50,"Curaçao":51,
+  France:1, Spain:2, Argentina:3, England:4, Portugal:5,
+  Brazil:6, Netherlands:7, Morocco:8, Belgium:9, Germany:10,
+  Croatia:11, Colombia:13, Senegal:14, Mexico:15, USA:16,
+  Uruguay:17, Japan:18, Switzerland:19, Iran:21, "Türkiye":22,
+  Ecuador:23, Austria:24, "South Korea":25, Australia:27, Algeria:28,
+  Egypt:29, Canada:30, Norway:31, Panama:33, "Côte d'Ivoire":34,
+  Sweden:38, Paraguay:40, Czechia:41, Scotland:43, Tunisia:44,
+  "DR Congo":46, Uzbekistan:50, Qatar:55, Iraq:57, "South Africa":60,
+  "Saudi Arabia":61, Jordan:63, "Bosnia & Herz.":65, "Cabo Verde":69,
+  Ghana:74, "Curaçao":82, Haiti:83, "New Zealand":85,
 };
 function strength(t){return 200-(FIFA_RANK[t]||99);}
 
@@ -304,6 +317,25 @@ const GROUPS = {
   K:{teams:["Portugal","Colombia","Uzbekistan","DR Congo"]},
   L:{teams:["England","Croatia","Ghana","Panama"]},
 };
+
+// ── Team-name resolver (maps external/API names → our canonical names) ──────────
+const TEAM_ALIASES = {
+  "United States":"USA","United States of America":"USA","United States Men's National Team":"USA",
+  "Korea Republic":"South Korea","Republic of Korea":"South Korea","Korea":"South Korea",
+  "Czech Republic":"Czechia",
+  "Ivory Coast":"Côte d'Ivoire","Cote d'Ivoire":"Côte d'Ivoire",
+  "Cape Verde":"Cabo Verde","Cape Verde Islands":"Cabo Verde",
+  "Congo DR":"DR Congo","DR Congo (Congo DR)":"DR Congo","Democratic Republic of the Congo":"DR Congo","Democratic Republic of Congo":"DR Congo","Congo DR (Kinshasa)":"DR Congo",
+  "Bosnia and Herzegovina":"Bosnia & Herz.","Bosnia-Herzegovina":"Bosnia & Herz.","Bosnia & Herzegovina":"Bosnia & Herz.","Bosnia":"Bosnia & Herz.",
+  "Turkey":"Türkiye","Turkiye":"Türkiye",
+  "Curacao":"Curaçao",
+  "Iran":"Iran","IR Iran":"Iran",
+};
+function canon(s){ return (s||"").toLowerCase().normalize("NFD").replace(/[\u0300-\u036f]/g,"").replace(/[^a-z0-9]/g,""); }
+const CANON_MAP = {};
+Object.values(GROUPS).flatMap(g=>g.teams).forEach(t=>{ CANON_MAP[canon(t)] = t; });
+Object.entries(TEAM_ALIASES).forEach(([k,v])=>{ CANON_MAP[canon(k)] = v; });
+function resolveTeam(s){ return CANON_MAP[canon(s)] || null; }
 
 const VENUES = {
   "MEX": { n: "Estadio Azteca, Mexico City", tz: "-06:00" },
@@ -387,11 +419,12 @@ function initGR() {
 }
 
 function save(){ 
-  localStorage.setItem("wc26_v8", JSON.stringify({PREDICTION_MODE, GR, SCORES, MP, KO_SCORES})); 
+  try { localStorage.setItem("wc26_v8", JSON.stringify({PREDICTION_MODE, GR, SCORES, MP, KO_SCORES})); } catch(e) {}
   flashSave(); 
 }
 function load(){ 
-  const d=JSON.parse(localStorage.getItem("wc26_v8")||"null"); 
+  let d=null;
+  try { d=JSON.parse(localStorage.getItem("wc26_v8")||"null"); } catch(e) {}
   if(d){ 
     if(d.PREDICTION_MODE) PREDICTION_MODE=d.PREDICTION_MODE;
     if(d.GR) GR=d.GR;
@@ -466,6 +499,128 @@ function parseLocalTime(monthDayStr, tStr, venueId) {
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
+// LIVE SYNC — TheSportsDB (FIFA World Cup league id 4429, season 2026)
+// Free, browser-callable JSON API. Works when this file runs as a local/hosted
+// page. (It will NOT work inside the Claude.ai artifact sandbox — different
+// environment — but neither does the localStorage autosave, so that's expected.)
+// ─────────────────────────────────────────────────────────────────────────────
+async function syncResults(){
+  const btn=document.getElementById('syncBtn'), st=document.getElementById('syncStatus');
+  btn.disabled=true; st.textContent='Fetching results from TheSportsDB…';
+  try{
+    const events = await fetchWCEvents();
+    const finished = events.filter(e =>
+      e && e.intHomeScore!=null && e.intHomeScore!=="" &&
+      e.intAwayScore!=null && e.intAwayScore!==""
+    );
+    if(!finished.length){
+      st.textContent = `No finished matches found yet (checked ${new Date().toLocaleString()}). First match is 11 Jun.`;
+      return;
+    }
+    const r = applyResults(finished);
+    PREDICTION_MODE = "match";   // real scores → Match Predictor mode
+    save();
+    rerenderActive();
+    st.textContent = `Synced ${new Date().toLocaleString()}: ${r.g} group + ${r.k} knockout result(s) applied`
+      + (r.unmatched ? `, ${r.unmatched} not matched.` : `.`);
+  }catch(err){
+    st.textContent = 'Sync failed — '+(err.message||err)+'. (Likely a CORS/free-tier limit.) Manual score entry still works.';
+  }finally{
+    btn.disabled=false;
+  }
+}
+
+async function fetchWCEvents(){
+  const base = 'https://www.thesportsdb.com/api/v1/json/123/';
+  // Primary: full season (all 104 matches with scores once played)
+  try{
+    const res = await fetch(base + 'eventsseason.php?id=4429&s=2026');
+    if(res.ok){
+      const j = await res.json();
+      if(j && Array.isArray(j.events) && j.events.length) return j.events;
+    }
+  }catch(_){}
+  // Fallback: most recent finished matches in the league
+  const res2 = await fetch(base + 'eventspastleague.php?id=4429');
+  const j2 = await res2.json();
+  return (j2 && Array.isArray(j2.events)) ? j2.events : [];
+}
+
+function applyResults(finished){
+  let gCount=0, kCount=0, unmatched=0;
+  const groupEvents=[], koEvents=[];
+
+  finished.forEach(e=>{
+    const home=resolveTeam(e.strHomeTeam), away=resolveTeam(e.strAwayTeam);
+    if(!home || !away){ unmatched++; return; }
+    const hs=parseInt(e.intHomeScore), as=parseInt(e.intAwayScore);
+    if(isNaN(hs)||isNaN(as)){ unmatched++; return; }
+    const ev={home, away, hs, as, raw:e};
+    // group match if both teams share a group AND a scheduled fixture pairs them
+    const grp = groupOf(home);
+    if(grp && groupOf(away)===grp && FIXTURES[grp].some(f=>pair(f.a,f.b,home,away))){
+      groupEvents.push({grp, ...ev});
+    } else {
+      koEvents.push(ev);
+    }
+  });
+
+  // 1) Apply group scores (in each fixture's a/b orientation)
+  groupEvents.forEach(ev=>{
+    const f = FIXTURES[ev.grp].find(f=>pair(f.a,f.b,ev.home,ev.away));
+    if(!f) { unmatched++; return; }
+    const homeIsA = (f.a===ev.home);
+    SCORES[f.id] = { sa: String(homeIsA?ev.hs:ev.as), sb: String(homeIsA?ev.as:ev.hs) };
+    gCount++;
+  });
+
+  // recompute standings so knockout slots resolve to the real qualifiers
+  updateAllTables();
+
+  // 2) Apply knockout scores by matching resolved bracket teams, iteratively
+  const allKO=[...R32,...R16,...QF,...SF,FIN];
+  let changed=true, guard=0;
+  while(changed && guard++<6){
+    changed=false;
+    koEvents.forEach(ev=>{
+      if(ev._done) return;
+      for(const m of allKO){
+        const [a,b]=mTeams(m.id);
+        if(a==="TBD"||b==="TBD") continue;
+        if(pair(a,b,ev.home,ev.away)){
+          const aIsHome=(a===ev.home);
+          const sc={ sa:String(aIsHome?ev.hs:ev.as), sb:String(aIsHome?ev.as:ev.hs), pens:"" };
+          // shootout: equal score → try to read a winner field, else leave for user
+          if(ev.hs===ev.as){
+            const pw = resolveTeam(ev.raw.strResult) || resolveTeam(ev.raw.strWinner) || "";
+            if(pw===a||pw===b) sc.pens=pw;
+          }
+          KO_SCORES[m.id]=sc; ev._done=true; kCount++; changed=true;
+          break;
+        }
+      }
+    });
+  }
+  unmatched += koEvents.filter(ev=>!ev._done).length;
+
+  updateAllTables();
+  return {g:gCount, k:kCount, unmatched};
+}
+
+function groupOf(team){ for(const p of Object.keys(GROUPS)){ if(GROUPS[p].teams.includes(team)) return p; } return null; }
+function pair(a,b,x,y){ return (a===x&&b===y)||(a===y&&b===x); }
+
+function rerenderActive(){
+  const active=document.querySelector(".view.active");
+  if(!active){ updatePill(); return; }
+  if(active.id==="vgroups") renderGroups();
+  else if(active.id==="vknockout") renderKnockout();
+  else if(active.id==="vpath") renderPath();
+  else if(active.id==="vschedule") renderSchedule();
+  updatePill();
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
 // UI RENDERING
 // ─────────────────────────────────────────────────────────────────────────────
 function showView(v,btn){
@@ -494,7 +649,7 @@ function renderGroups() {
   
   const hintText = PREDICTION_MODE === "quick" 
     ? "<strong>Quick Rank Mode:</strong> Use the ▲▼ arrows to rapidly order the 2026 groups. Best third-place tiebreakers use official rankings." 
-    : "<strong>Match Predictor Mode:</strong> Type in scores to automatically calculate group tables (3 pts for win, 1 for draw).";
+    : "<strong>Match Predictor Mode:</strong> Type in scores to automatically calculate group tables (3 pts for win, 1 for draw). Use <strong>⟳ Sync results</strong> to auto-fill finished matches.";
 
   let html = `
     <div class="mode-toggle">
@@ -646,7 +801,7 @@ function renderKnockout(){
   
   const hintText = PREDICTION_MODE === "quick" 
     ? `Click a team to pick the winner. Unpicked matches auto-advance the higher-ranked team (shown in <span style="color:#2e7d32; font-weight:600;">green</span>).` 
-    : `Enter scores for each match. If a match ends in a draw, a penalty selector will appear. Unplayed matches auto-advance the higher-ranked team.`;
+    : `Enter scores for each match. If a match ends in a draw, a penalty selector will appear. Unplayed matches auto-advance the higher-ranked team. <strong>⟳ Sync results</strong> fills finished matches automatically (confirm shootout winners manually).`;
 
   let html=`<div class="hint">${hintText}</div>`;
   
