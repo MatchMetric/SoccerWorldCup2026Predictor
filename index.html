@@ -53,6 +53,7 @@ body { font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',Roboto,sans-serif
 .fi-sm { width:18px; height:13px; object-fit:cover; border-radius:2px; border:0.5px solid rgba(0,0,0,0.1); flex-shrink:0; }
 .fi-lg { width:52px; height:37px; object-fit:cover; border-radius:3px; border:1px solid rgba(0,0,0,0.12); flex-shrink:0; }
 .fi-xl { width:72px; height:51px; object-fit:cover; border-radius:4px; border:1px solid rgba(0,0,0,0.12); }
+.fb { font-size:10px; color:var(--t3); font-weight:600; flex-shrink:0; }
 .rank-badge { font-size:10px; color:var(--t3); font-family:'SF Mono','Fira Code',monospace; flex-shrink:0; min-width:34px; text-align:right; }
 
 /* MODE TOGGLE */
@@ -280,7 +281,7 @@ const ISO = {
 };
 function furl(t,w){const c=ISO[t];return c?`https://flagcdn.com/${w}x${Math.round(w*0.75)}/${c}.png`:"";}
 function fimg(t,cls){
-  if (t==="TBD") return `<span class="fb">TBD</span>`;
+  if (t==="TBD"||t==="Best 3rd") return `<span class="fb">${t}</span>`;
   const w=cls==="fi-xl"?96:cls==="fi-lg"?64:cls==="fi-sm"?24:28;
   const url=furl(t,w),fb=(t||"").slice(0,3).toUpperCase();
   if(!url)return`<span class="fb">${fb}</span>`;
@@ -411,6 +412,7 @@ let MP = {};
 let KO_SCORES = {}; // Tracks Match Mode Knockout scores and penalty winners
 let STANDINGS = {};
 let BEST3 = [];    
+let THIRD_ASSIGN = {}; // slotKey -> group letter (one-to-one mapping of best thirds → R32 slots)
 
 function initGR() {
   Object.keys(GROUPS).forEach(p => {
@@ -482,6 +484,47 @@ function updateAllTables() {
   }
   
   BEST3 = allThirds.slice(0,8).map(x => x.team);
+
+  // assign the 8 qualifying thirds to the 8 "best third" R32 slots, one-to-one
+  THIRD_ASSIGN = computeThirdAssign();
+}
+
+// Build a valid one-to-one mapping: each qualifying third's GROUP → exactly one
+// "best third" slot whose allowed-groups list contains it. Uses most-constrained-
+// first backtracking, so it finds an assignment whenever one exists. This is what
+// stops the same third-place team (e.g. Australia) landing in multiple R32 ties.
+function computeThirdAssign(){
+  const slots=[];
+  R32.forEach(m=>{
+    if(m.a.t==="b3") slots.push({key:m.id+"-a", allowed:m.a.gs.split("/")});
+    if(m.b.t==="b3") slots.push({key:m.id+"-b", allowed:m.b.gs.split("/")});
+  });
+  // groups whose third-placed team is one of the best 8
+  const qGroups = Object.keys(GROUPS).filter(g=>{
+    const third = STANDINGS[g] && STANDINGS[g][2] && STANDINGS[g][2].team;
+    return third && BEST3.includes(third);
+  });
+  // restrict each slot to its eligible qualifying groups, most-constrained first
+  const elig = slots
+    .map(s=>({ key:s.key, groups:s.allowed.filter(g=>qGroups.includes(g)) }))
+    .sort((a,b)=>a.groups.length-b.groups.length);
+
+  const assign={}; const used=new Set();
+  const thirdStrength = g => strength(STANDINGS[g][2].team);
+
+  function bt(i){
+    if(i>=elig.length) return true;
+    const s=elig[i];
+    const cands=s.groups.filter(g=>!used.has(g)).sort((g1,g2)=>thirdStrength(g2)-thirdStrength(g1));
+    for(const g of cands){
+      used.add(g); assign[s.key]=g;
+      if(bt(i+1)) return true;
+      used.delete(g); delete assign[s.key];
+    }
+    return false;
+  }
+  bt(0);
+  return assign;
 }
 
 function parseLocalTime(monthDayStr, tStr, venueId) {
@@ -556,7 +599,6 @@ function applyResults(finished){
     const hs=parseInt(e.intHomeScore), as=parseInt(e.intAwayScore);
     if(isNaN(hs)||isNaN(as)){ unmatched++; return; }
     const ev={home, away, hs, as, raw:e};
-    // group match if both teams share a group AND a scheduled fixture pairs them
     const grp = groupOf(home);
     if(grp && groupOf(away)===grp && FIXTURES[grp].some(f=>pair(f.a,f.b,home,away))){
       groupEvents.push({grp, ...ev});
@@ -586,11 +628,10 @@ function applyResults(finished){
       if(ev._done) return;
       for(const m of allKO){
         const [a,b]=mTeams(m.id);
-        if(a==="TBD"||b==="TBD") continue;
+        if(a==="TBD"||b==="TBD"||a==="Best 3rd"||b==="Best 3rd") continue;
         if(pair(a,b,ev.home,ev.away)){
           const aIsHome=(a===ev.home);
           const sc={ sa:String(aIsHome?ev.hs:ev.as), sb:String(aIsHome?ev.as:ev.hs), pens:"" };
-          // shootout: equal score → try to read a winner field, else leave for user
           if(ev.hs===ev.as){
             const pw = resolveTeam(ev.raw.strResult) || resolveTeam(ev.raw.strWinner) || "";
             if(pw===a||pw===b) sc.pens=pw;
@@ -735,21 +776,23 @@ function updateScore(matchId, field, val) {
 // ─────────────────────────────────────────────────────────────────────────────
 // KNOCKOUT HELPERS & VIEW
 // ─────────────────────────────────────────────────────────────────────────────
-function fav(ts){ return ts.filter(t=>t&&t!=="TBD").sort((a,b)=>strength(b)-strength(a))[0]||"TBD"; }
+function fav(ts){ return ts.filter(t=>t&&t!=="TBD"&&t!=="Best 3rd").sort((a,b)=>strength(b)-strength(a))[0]||"TBD"; }
 
-function slot(s){
+function slot(s, slotKey){
   if(s.t==="1st") return STANDINGS[s.g]?.[0]?.team || "TBD";
   if(s.t==="2nd") return STANDINGS[s.g]?.[1]?.team || "TBD";
   if(s.t==="b3"){
-    const candidates=s.gs.split("/").map(g=> BEST3.find(t=>STANDINGS[g]?.[2]?.team===t)).filter(Boolean);
-    return candidates.sort((a,b)=>strength(b)-strength(a))[0]||"Best 3rd";
+    const g = THIRD_ASSIGN[slotKey];
+    const third = g && STANDINGS[g]?.[2]?.team;
+    if(third && BEST3.includes(third)) return third;
+    return "Best 3rd";
   }
   return "TBD";
 }
 
 function mTeams(id){
   const r=R32.find(m=>m.id===id);
-  if(r) return [slot(r.a),slot(r.b)];
+  if(r) return [slot(r.a, id+"-a"), slot(r.b, id+"-b")];
   const all=[...R16,...QF,...SF,FIN];
   const m=all.find(x=>x.id===id);
   if(!m) return ["TBD","TBD"];
@@ -758,7 +801,7 @@ function mTeams(id){
 
 function mWinner(id){
   const [a, b] = mTeams(id);
-  const f = fav([a,b].filter(t=>t&&t!=="TBD"));
+  const f = fav([a,b].filter(t=>t&&t!=="TBD"&&t!=="Best 3rd"));
   
   if (PREDICTION_MODE === "match") {
     const s = KO_SCORES[id];
@@ -800,7 +843,7 @@ function renderKnockout(){
   ];
   
   const hintText = PREDICTION_MODE === "quick" 
-    ? `Click a team to pick the winner. Unpicked matches auto-advance the higher-ranked team (shown in <span style="color:#2e7d32; font-weight:600;">green</span>).` 
+    ? `Click a team to pick the winner. Unpicked matches auto-advance the higher-ranked team (shown in <span style="color:#2e7d32; font-weight:600;">green</span>). Third-place slotting is an approximation of FIFA's lookup table.` 
     : `Enter scores for each match. If a match ends in a draw, a penalty selector will appear. Unplayed matches auto-advance the higher-ranked team. <strong>⟳ Sync results</strong> fills finished matches automatically (confirm shootout winners manually).`;
 
   let html=`<div class="hint">${hintText}</div>`;
@@ -823,12 +866,12 @@ function renderKnockout(){
 
 function mCardHTML(id){
   const [a,b] = mTeams(id), w = mWinner(id);
-  const favT = fav([a,b].filter(t=>t&&t!=="TBD"));
+  const favT = fav([a,b].filter(t=>t&&t!=="TBD"&&t!=="Best 3rd"));
   
   if (PREDICTION_MODE === "quick") {
     const picked = MP[id];
     function row(t){
-      if (t === "TBD") return `<div class="mteam"><span class="fb">TBD</span><span class="mn" style="color:var(--t3);">TBD</span></div>`;
+      if (t === "TBD" || t === "Best 3rd") return `<div class="mteam"><span class="fb">${t}</span><span class="mn" style="color:var(--t3);">${t}</span></div>`;
       const isPick = (picked === t), isFav = (t === favT), isW = (w === t);
       let cls = "mteam";
       if (picked) cls = isPick ? "mteam winner" : "mteam loser";
@@ -845,7 +888,7 @@ function mCardHTML(id){
     const isDraw = (s.sa !== "" && s.sb !== "" && parseInt(s.sa) === parseInt(s.sb));
     
     function mRow(t, field){
-      if (t === "TBD") return `<div class="mteam"><span class="fb">TBD</span><span class="mn" style="color:var(--t3);">TBD</span></div>`;
+      if (t === "TBD" || t === "Best 3rd") return `<div class="mteam"><span class="fb">${t}</span><span class="mn" style="color:var(--t3);">${t}</span></div>`;
       const isW = (w === t);
       const isFav = (t === favT);
       // Light visual cue for the winner even before entering a score
@@ -858,7 +901,7 @@ function mCardHTML(id){
     
     let html = `<div class="mcard">${mRow(a, 'sa')}${mRow(b, 'sb')}`;
     
-    if (isDraw && a !== "TBD" && b !== "TBD") {
+    if (isDraw && a !== "TBD" && b !== "TBD" && a !== "Best 3rd" && b !== "Best 3rd") {
        html += `<div class="ko-pens">
          <span>Penalties:</span>
          <select onchange="updateKOPens('${id}', this.value)">
