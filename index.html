@@ -611,18 +611,23 @@ async function fetchWC(){
 function normalizeFinished(matches){
   const out=[];
   matches.forEach(m=>{
-    const ft = m.score && m.score.ft;
-    if(!Array.isArray(ft) || ft.length<2) return;
+    const sc = m.score || {};
+    const ft = sc.ft;
+    if(!Array.isArray(ft) || ft.length<2) return;          // not played
     const home=resolveTeam(m.team1), away=resolveTeam(m.team2);
     if(!home || !away) return;
-    const hs=parseInt(ft[0]), as=parseInt(ft[1]);
+    let hs=parseInt(ft[0]), as=parseInt(ft[1]);
     if(isNaN(hs)||isNaN(as)) return;
-    let pens="";
-    const p=m.score.p;
-    if(hs===as && Array.isArray(p) && p.length>=2){
+    let pens="", aet=false;
+    const p=sc.p, et=sc.et;
+    if(Array.isArray(p) && p.length>=2){
+      // penalty shootout: keep the drawn score, winner decided on penalties
       pens = (parseInt(p[0])>parseInt(p[1])) ? home : away;
+    } else if(Array.isArray(et) && et.length>=2 && parseInt(et[0])!==parseInt(et[1])){
+      // decided in extra time (no shootout): use the extra-time final score
+      hs=parseInt(et[0]); as=parseInt(et[1]); aet=true;
     }
-    out.push({home, away, hs, as, pens});
+    out.push({home, away, hs, as, pens, aet});
   });
   return out;
 }
@@ -670,6 +675,7 @@ function applyResults(evts, allMatches){
           const aIsHome=(a===ev.home);
           const sc={ sa:String(aIsHome?ev.hs:ev.as), sb:String(aIsHome?ev.as:ev.hs), pens:"" };
           if(ev.hs===ev.as && (ev.pens===a||ev.pens===b)) sc.pens=ev.pens;
+          if(ev.aet) sc.aet=true;
           KO_SCORES[m.id]=sc; ev._done=true; kCount++; changed=true;
           break;
         }
@@ -1042,6 +1048,7 @@ function renderSchedule() {
          if (s && s.sa !== "" && s.sb !== "") {
             scoreStr = `${s.sa} - ${s.sb}`;
             if (s.sa === s.sb && s.pens) scoreStr += `<span>(${s.pens.slice(0,3).toUpperCase()} pens)</span>`;
+            else if (s.aet) scoreStr += `<span>(a.e.t.)</span>`;
          }
       } else {
          if (MP[id]) scoreStr = `Win: ${w.slice(0,3).toUpperCase()}`;
